@@ -26,13 +26,9 @@ void QBackendPlugin::registerTypes(const char *uri)
         // This is executing on the QML type loader thread right now. The connection needs
         // to be moved after the type registration, along with its QIODevices.
         //
-        // This is carefully possible by blocking the readyRead signals, doing the
-        // synchronous type setup, and then moving the connection along with its children
-        // to the main thread. Read signals are then unblocked once the QML engine is
-        // available and it's safe to instantiate the root object.
-        singleConnection->blockReadSignals(true);
-        // registerTypes will synchronously figure out configuration, make the connection,
-        // wait for the types message, and register those with qmlRegisterType.
+        // To do this, the connection will (synchronously) block until type
+        // registration is complete, and we then move the connection along with
+        // its children to the main thread.
         singleConnection->registerTypes(uri);
         singleConnection->moveToThread(QCoreApplication::instance()->thread());
 
@@ -43,7 +39,6 @@ void QBackendPlugin::registerTypes(const char *uri)
                 // The root object and other initialization can't take place until there is
                 // a qml engine, so these are still blocked at this point.
                 singleConnection->setQmlEngine(engine);
-                singleConnection->blockReadSignals(false);
 
                 QObject *root = singleConnection->rootObject();
                 // The rootObject has JS ownership, and we'll be returning a reference to

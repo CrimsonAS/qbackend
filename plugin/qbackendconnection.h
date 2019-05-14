@@ -53,7 +53,6 @@ public:
     QJSValue ensureJSObject(const QByteArray &identifier, const QJsonObject &type);
 
     void registerTypes(const char *uri);
-    void blockReadSignals(bool blocked);
 
     void invokeMethod(const QByteArray& identifier, const QString& method, const QJsonArray& params);
     void addObjectProxy(const QByteArray& identifier, QBackendRemoteObject* object);
@@ -64,7 +63,7 @@ public:
     void moveToThread(QThread *thread);
 
     // Make this private once blocking invoke exists
-    QJsonObject waitForMessage(std::function<bool(const QJsonObject&)> callback);
+    QJsonObject waitForMessage(const char* waitType, std::function<bool(const QJsonObject&)> callback);
 
     QMetaObject *newTypeMetaObject(const QJsonObject &type);
 
@@ -90,7 +89,6 @@ private:
     QByteArray m_msgBuf;
     QList<QByteArray> m_pendingData;
     int m_version = 0;
-    bool m_blockReadSignals = false;
 
     bool ensureConnectionConfig();
     bool ensureConnectionInit();
@@ -103,8 +101,23 @@ private:
 
     void connectionError(const QString &context);
 
+    enum class ConnectionState {
+        // Pre-VERSION
+        WantVersion,
+        // Pre-CREATABLE_TYPES
+        WantTypes,
+        // Want a QML engine pointer
+        WantEngine,
+        // Want a ROOT
+        WantRoot,
+        // Everything (including ROOT and QML engine) done.
+        Established
+    };
+    ConnectionState m_state = ConnectionState::WantVersion;
+    void setState(ConnectionState newState);
+
     QList<QJsonObject> m_pendingMessages;
-    std::function<bool(const QJsonObject&)> m_syncCallback;
+    QList<std::function<bool(const QJsonObject&)>> m_syncCallbacks;
     QJsonObject m_syncResult;
 
     // Hash of identifier -> proxy object for all existing objects

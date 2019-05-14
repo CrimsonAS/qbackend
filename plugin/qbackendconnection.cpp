@@ -23,12 +23,14 @@ Q_LOGGING_CATEGORY(lcProtoExtreme, "backend.proto.extreme", QtWarningMsg)
 QBackendConnection::QBackendConnection(QObject *parent)
     : QObject(parent)
 {
+    setState(ConnectionState::WantVersion);
 }
 
 QBackendConnection::QBackendConnection(QQmlEngine *engine)
     : QObject()
     , m_qmlEngine(engine)
 {
+    setState(ConnectionState::WantVersion);
 }
 
 // When QBackendConnection is a singleton, qmlEngine/qmlContext may not always work.
@@ -40,13 +42,18 @@ QQmlEngine *QBackendConnection::qmlEngine() const
 
 void QBackendConnection::setQmlEngine(QQmlEngine *engine)
 {
-    Q_ASSERT(!m_qmlEngine);
-    if (m_qmlEngine) {
+    Q_ASSERT(!m_qmlEngine || m_qmlEngine != engine);
+    if (m_qmlEngine && m_qmlEngine != engine) {
         qCritical(lcConnection) << "Backend connection is reused by another QML engine. This will go badly.";
         return;
     }
 
     m_qmlEngine = engine;
+
+    // We already got a ROOT message, but couldn't process it before. Do so now.
+    if (m_state == ConnectionState::WantEngine) {
+        setState(ConnectionState::WantRoot);
+    }
 }
 
 QUrl QBackendConnection::url() const
@@ -134,25 +141,8 @@ void QBackendConnection::setBackendIo(QIODevice *rd, QIODevice *wr)
         m_pendingData.clear();
     }
 
-    if (!m_blockReadSignals) {
-        connect(m_readIo, &QIODevice::readyRead, this, &QBackendConnection::handleDataReady);
-        handleDataReady();
-    }
-}
-
-void QBackendConnection::blockReadSignals(bool v)
-{
-    if (v == m_blockReadSignals) {
-        return;
-    }
-    m_blockReadSignals = v;
-
-    if (v && m_readIo) {
-        disconnect(m_readIo, &QIODevice::readyRead, this, &QBackendConnection::handleDataReady);
-    } else if (!v && m_readIo) {
-        connect(m_readIo, &QIODevice::readyRead, this, &QBackendConnection::handleDataReady);
-        QMetaObject::invokeMethod(this, &QBackendConnection::handleDataReady, Qt::QueuedConnection);
-    }
+    connect(m_readIo, &QIODevice::readyRead, this, &QBackendConnection::handleDataReady);
+    handleDataReady();
 }
 
 void QBackendConnection::moveToThread(QThread *thread)
@@ -217,7 +207,7 @@ bool QBackendConnection::ensureConnectionInit()
     qCDebug(lcConnection) << "Blocking until backend connection is ready";
     tm.restart();
 
-    waitForMessage([](const QJsonObject &msg) { return msg.value("command").toString() == "VERSION"; });
+    waitForMessage("version", [](const QJsonObject &msg) { return msg.value("command").toString() == "VERSION"; });
 
     qCDebug(lcConnection) << "Blocked for" << tm.elapsed() << "ms to initialize connection";
     return m_version;
@@ -240,7 +230,7 @@ bool QBackendConnection::ensureRootObject()
     qCDebug(lcConnection) << "Blocking until root object is ready";
     tm.restart();
 
-    waitForMessage([](const QJsonObject &msg) { return msg.value("command").toString() == "ROOT"; });
+    waitForMessage("root", [](const QJsonObject &msg) { return msg.value("command").toString() == "ROOT"; });
 
     qCDebug(lcConnection) << "Blocked for" << tm.elapsed() << "ms for root object";
     return (bool)m_rootObject;
@@ -263,7 +253,7 @@ void QBackendConnection::registerTypes(const char *uri)
     qCDebug(lcConnection) << "Blocking to initialize creatable types";
     tm.restart();
 
-    waitForMessage([](const QJsonObject &msg) { return msg.value("command").toString() == "CREATABLE_TYPES"; });
+    waitForMessage("creatable_types", [](const QJsonObject &msg) { return msg.value("command").toString() == "CREATABLE_TYPES"; });
 
     for (const QJsonValue &v : m_creatableTypes) {
         QJsonObject type = v.toObject();
@@ -391,44 +381,144 @@ void QBackendConnection::handleMessage(const QByteArray &message)
     handleMessage(json.object());
 }
 
+void QBackendConnection::setState(ConnectionState newState)
+{
+    if (newState == m_state) {
+        return;
+    }
+
+    auto oldState = m_state;
+    m_state = newState;
+
+    switch (m_state) {
+    case ConnectionState::WantVersion:
+        qCDebug(lcConnection) << "State -- want version.";
+        break;
+    case ConnectionState::WantTypes:
+        Q_ASSERT(oldState == ConnectionState::WantVersion);
+        qCDebug(lcConnection) << "State -- Got version. Want types.";
+        break;
+    case ConnectionState::WantEngine:
+        Q_ASSERT(oldState == ConnectionState::WantTypes);
+        if (m_qmlEngine) {
+            // immediately transition
+            setState(ConnectionState::WantRoot);
+        } else {
+            qCDebug(lcConnection) << "State -- Got types. Want engine.";
+        }
+        break;
+    case ConnectionState::WantRoot:
+        Q_ASSERT(oldState == ConnectionState::WantEngine);
+        qCDebug(lcConnection) << "State -- Got engine, want root.";
+        break;
+    case ConnectionState::Established:
+        Q_ASSERT(m_qmlEngine);
+        Q_ASSERT(oldState == ConnectionState::WantRoot);
+        // ok, we have ROOT, types, and an engine. try process it all.
+        qCDebug(lcConnection) << "State -- Entered established state. Flushing pending.";
+        handlePendingMessages();
+        break;
+    }
+
+    QMetaObject::invokeMethod(this, &QBackendConnection::handlePendingMessages, Qt::QueuedConnection);
+}
+
 void QBackendConnection::handleMessage(const QJsonObject &cmd)
 {
     QString command = cmd.value("command").toString();
 
-    // If there is a syncCallback, call it to see if this is the message it wants.
-    // If so, handle it normally, save it in m_syncResult, and return. If not,
-    // queue it to handle later.
-    //
+    bool doDeliver = true;
     // If there is a syncResult, always queue the message.
-    if ((m_syncCallback && !m_syncCallback(cmd)) || !m_syncResult.isEmpty()) {
-        qCDebug(lcConnection) << "Queuing handling of unrelated" << command << "during waitForMessage";
-        if (m_pendingMessages.isEmpty()) {
-            QMetaObject::invokeMethod(this, &QBackendConnection::handlePendingMessages, Qt::QueuedConnection);
+    if (!m_syncResult.isEmpty()) {
+        qCDebug(lcConnection) << "Queueing handling of " << command << " due to syncResult";
+        doDeliver = false;
+    }
+
+    // If the connection is not yet established, then block the message until
+    // callbacks have been installed.
+    if (m_state != ConnectionState::Established && !m_syncCallbacks.size()) {
+        qCDebug(lcConnection) << "Queueing handling of " << command << " as the connection is not yet established, and no callbacks have been installed";
+        doDeliver = false;
+    }
+
+    // Check the command against the state. Don't allow a command to deliver
+    // unless it's in the right state!
+    switch (m_state) {
+    case ConnectionState::WantVersion:
+        if (command != "VERSION") {
+            qCDebug(lcConnection) << "Queueing handling of " << command << " as we are WantVersion";
+            doDeliver = false;
         }
+        break;
+    case ConnectionState::WantTypes:
+        if (command != "CREATABLE_TYPES") {
+            qCDebug(lcConnection) << "Queueing handling of " << command << " as we are WantTypes";
+            doDeliver = false;
+        }
+        break;
+    case ConnectionState::WantEngine:
+        // Need a QML engine pointer. Queue everything except further ROOT.
+        qCDebug(lcConnection) << "Queueing handling of " << command << " as we WantEngine";
+        doDeliver = false;
+        break;
+    case ConnectionState::WantRoot:
+        if (command != "ROOT") {
+            qCDebug(lcConnection) << "Queueing handling of " << command << " as we are WantRoot";
+            doDeliver = false;
+        }
+        break;
+    case ConnectionState::Established:
+        break; // no queueing based on state.
+    }
+
+    if (!doDeliver) {
         m_pendingMessages.append(cmd);
         return;
     }
 
-    if (m_syncCallback) {
-        // Reset callback, set result, and handle immediately, bypassing the queue
+    // Pass the message to all sync callbacks to see if any of them want it.
+    // If so, handle it immediately, bypassing the queue.
+    bool wasHandled = false;
+    for (int i = 0; i < m_syncCallbacks.size(); i++) {
+        // Remove callback, set result, and handle immediately, bypassing the queue
         // even if out of order; see waitForMessage for details.
-        m_syncCallback = nullptr;
-        m_syncResult = cmd;
-    } else if (!m_pendingMessages.isEmpty()) {
-        // Other messages are pending, so queue this one as well
-        qCDebug(lcConnection) << "Queuing handling of" << command << "into non-empty message queue";
-        // In this case, there's no need to trigger the handler later; something already has
-        m_pendingMessages.append(cmd);
-        return;
+        if (m_syncCallbacks.at(i)(cmd)) {
+            m_syncCallbacks.removeAt(i);
+            m_syncResult = cmd;
+            wasHandled = true;
+            break;
+        }
+    }
+
+    if (!m_syncCallbacks.isEmpty() && !wasHandled) {
+        if (command == "ROOT" && m_state == ConnectionState::WantRoot) {
+            // don't queue this, even if there isn't a callback. go process it
+            // and move on.
+        } else {
+            // Try again later.
+            qCDebug(lcConnection) << "Queuing handling of" << command << "into non-empty message queue";
+            m_pendingMessages.append(cmd);
+            QMetaObject::invokeMethod(this, &QBackendConnection::handlePendingMessages, Qt::QueuedConnection);
+            return;
+        }
     }
 
     if (command == "VERSION") {
         Q_ASSERT(!m_version);
+        setState(ConnectionState::WantTypes);
         m_version = cmd.value("version").toInt();
         qCInfo(lcConnection) << "Connected to backend version" << m_version;
     } else if (command == "CREATABLE_TYPES") {
+        setState(ConnectionState::WantEngine);
         m_creatableTypes = cmd.value("types").toArray();
     } else if (command == "ROOT") {
+        Q_ASSERT(m_state == ConnectionState::WantRoot ||
+                 m_state == ConnectionState::Established);
+
+        if (m_state != ConnectionState::Established) {
+            setState(ConnectionState::Established);
+        }
+
         // The cmd object itself is a backend object structure
         if (cmd.value("identifier").toString() != QStringLiteral("root")) {
             qCWarning(lcConnection) << "Root object has unexpected identifier:" << cmd.value("identifier");
@@ -508,7 +598,7 @@ void QBackendConnection::write(const QJsonObject &message)
 //
 // waitForMessage is safe to call recursively (for different messages), even if those messages
 // arrive out of order.
-QJsonObject QBackendConnection::waitForMessage(std::function<bool(const QJsonObject&)> callback)
+QJsonObject QBackendConnection::waitForMessage(const char *waitType, std::function<bool(const QJsonObject&)> callback)
 {
     // Flush write buffer before blocking
     while (m_writeIo->bytesToWrite() > 0) {
@@ -518,8 +608,8 @@ QJsonObject QBackendConnection::waitForMessage(std::function<bool(const QJsonObj
         }
     }
 
-    Q_ASSERT(!m_syncCallback);
-    m_syncCallback = callback;
+    qCDebug(lcConnection) << "Waiting for " << waitType;
+    m_syncCallbacks.append(callback);
 
     // When waitForMessage is called recursively from handleDataReady, make sure to
     // restore the syncResult before returning.
@@ -540,6 +630,7 @@ QJsonObject QBackendConnection::waitForMessage(std::function<bool(const QJsonObj
 
     QJsonObject re = m_syncResult;
     m_syncResult = savedResult;
+    qCDebug(lcConnection) << "Finished waiting for " << waitType;
     return re;
 }
 
@@ -585,7 +676,7 @@ void QBackendConnection::resetObjectData(const QByteArray& identifier, bool sync
     write(QJsonObject{{"command", "OBJECT_QUERY"}, {"identifier", QString::fromUtf8(identifier)}});
 
     if (synchronous) {
-        waitForMessage([identifier](const QJsonObject &message) -> bool {
+        waitForMessage("object_reset", [identifier](const QJsonObject &message) -> bool {
             if (message.value("command").toString() != "OBJECT_RESET")
                 return false;
             return message.value("identifier").toString().toUtf8() == identifier;

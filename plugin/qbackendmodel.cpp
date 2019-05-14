@@ -185,7 +185,7 @@ QJSValue BackendModelPrivate::fetchRow(int row)
     qCDebug(lcModel) << "blocking to fetch rows" << start << "to" << end << "to get data for row" << row;
 
     QMetaObject::invokeMethod(m_modelData, "requestRows", Q_ARG(int, start), Q_ARG(int, end-start+1));
-    m_connection->waitForMessage(
+    m_connection->waitForMessage("model_emit",
         [&](const QJsonObject &msg) {
             return msg.value("command").toString() == "EMIT" &&
                    msg.value("method").toString() == "modelRowData" &&

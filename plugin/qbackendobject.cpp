@@ -158,7 +158,6 @@ void BackendObjectPrivate::classBegin()
     if (!m_connection->qmlEngine()) {
         qCDebug(lcObject) << "setting engine" << qmlEngine(m_object) << "for connection at object instantiation";
         m_connection->setQmlEngine(qmlEngine(m_object));
-        m_connection->blockReadSignals(false);
     }
 }
 
