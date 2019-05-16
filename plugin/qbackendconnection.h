@@ -108,16 +108,14 @@ private:
         WantTypes,
         // Want a QML engine pointer
         WantEngine,
-        // Want a ROOT
-        WantRoot,
-        // Everything (including ROOT and QML engine) done.
-        Established
+        // Ready to handle messages
+        Ready
     };
     ConnectionState m_state = ConnectionState::WantVersion;
     void setState(ConnectionState newState);
 
     QList<QJsonObject> m_pendingMessages;
-    QList<std::function<bool(const QJsonObject&)>> m_syncCallbacks;
+    std::function<bool(const QJsonObject&)> m_syncCallback;
     QJsonObject m_syncResult;
 
     // Hash of identifier -> proxy object for all existing objects
