@@ -19,11 +19,11 @@ type Connection struct {
 	//
 	// This field may not be changed after connecting, but the object can of
 	// course change its fields at any time.
-	RootObject QObject
+	RootObject AnyQObject
 
 	in           io.ReadCloser
 	out          io.WriteCloser
-	objects      map[string]QObject
+	objects      map[string]*QObject
 	instantiable map[string]instantiableType
 	knownTypes   map[string]struct{}
 	err          error
@@ -47,7 +47,7 @@ func NewConnectionSplit(in io.ReadCloser, out io.WriteCloser) *Connection {
 	c := &Connection{
 		in:            in,
 		out:           out,
-		objects:       make(map[string]QObject),
+		objects:       make(map[string]*QObject),
 		instantiable:  make(map[string]instantiableType),
 		knownTypes:    make(map[string]struct{}),
 		processSignal: make(chan struct{}, 2),
@@ -56,7 +56,7 @@ func NewConnectionSplit(in io.ReadCloser, out io.WriteCloser) *Connection {
 	return c
 }
 
-type instantiableFactory func() QObject
+type instantiableFactory func() AnyQObject
 
 type instantiableType struct {
 	Type    *typeInfo
@@ -125,9 +125,9 @@ func (c *Connection) handle() {
 			return
 		}
 		impl, _ := asQObject(c.RootObject)
-		impl.Ref = true
+		impl.ref = true
 
-		data, err := impl.MarshalObject()
+		data, err := impl.marshalObject()
 		if err != nil {
 			c.fatal("marshalling of root object failed: %s", err)
 			return
@@ -141,7 +141,7 @@ func (c *Connection) handle() {
 		}{
 			messageBase{"ROOT"},
 			"root",
-			impl.Type,
+			impl.typeInfo,
 			data,
 		})
 	}
@@ -266,17 +266,17 @@ func (c *Connection) Process() error {
 		switch msg["command"] {
 		case "OBJECT_REF":
 			if objExists {
-				impl.Ref = true
+				impl.ref = true
 				impl.refsChanged()
 				// Record that the client has acknowledged an object of this type
-				c.knownTypes[impl.Type.Name] = struct{}{}
+				c.knownTypes[impl.typeInfo.Name] = struct{}{}
 			} else {
 				c.warn("ref of unknown object %s", identifier)
 			}
 
 		case "OBJECT_DEREF":
 			if objExists {
-				impl.Ref = false
+				impl.ref = false
 				impl.refsChanged()
 			} else {
 				c.warn("deref of unknown object %s", identifier)
@@ -301,7 +301,7 @@ func (c *Connection) Process() error {
 			} else {
 				obj := t.Factory()
 				impl, _ := initObjectId(obj, c, identifier)
-				impl.Ref = true
+				impl.ref = true
 			}
 
 		case "INVOKE":
@@ -313,7 +313,7 @@ func (c *Connection) Process() error {
 					break
 				}
 
-				if err := impl.Invoke(method, params...); err != nil {
+				if err := impl.invoke(method, params...); err != nil {
 					c.warn("invoke of %s on %s failed: %s", method, identifier, err)
 					break
 				}
@@ -340,10 +340,11 @@ func (c *Connection) ProcessSignal() <-chan struct{} {
 	return c.processSignal
 }
 
-func (c *Connection) addObject(obj QObject) {
-	id := obj.Identifier()
+func (c *Connection) addObject(obj *QObject) {
+	q := obj.qObject()
+	id := q.Identifier()
 	if eObj, exists := c.objects[id]; exists {
-		if obj == eObj {
+		if q == eObj {
 			return
 		} else {
 			c.fatal("registered different object with duplicate identifier %s", id)
@@ -351,7 +352,7 @@ func (c *Connection) addObject(obj QObject) {
 		}
 	}
 
-	c.objects[id] = obj
+	c.objects[id] = q
 }
 
 // Remove objects that have no property references, are not referenced by
@@ -362,16 +363,16 @@ func (c *Connection) addObject(obj QObject) {
 func (c *Connection) collectObjects() {
 	for id, obj := range c.objects {
 		impl, _ := asQObject(obj)
-		if !impl.Ref && impl.refCount < 1 && time.Now().After(impl.refGraceTime) {
+		if !impl.ref && impl.refCount < 1 && time.Now().After(impl.refGraceTime) {
 			delete(c.objects, id)
-			impl.Inactive = true
+			impl.inactive = true
 		}
 	}
 }
 
 // Object returns a registered QObject by its identifier
-func (c *Connection) Object(name string) QObject {
-	return c.objects[name]
+func (c *Connection) Object(name string) AnyQObject {
+	return c.objects[name].object
 }
 
 // InitObject explicitly initializes a QObject, assigning an identifier and
@@ -383,7 +384,7 @@ func (c *Connection) Object(name string) QObject {
 // InitObject can be useful to guarantee that a QObject and its signals are
 // non-nil and can be called, even when it may have not yet been sent to the
 // client.
-func (c *Connection) InitObject(obj QObject) error {
+func (c *Connection) InitObject(obj AnyQObject) error {
 	_, err := initObject(obj, c)
 	return err
 }
@@ -395,7 +396,7 @@ func (c *Connection) InitObject(obj QObject) error {
 // because holding a reference to that object would prevent garbage collection.
 // This is particularly true when writing wrapper types where the object is
 // uniquely wrapping another non-QObject type.
-func (c *Connection) InitObjectId(obj QObject, id string) error {
+func (c *Connection) InitObjectId(obj AnyQObject, id string) error {
 	if eobj, exists := c.objects[id]; exists && obj != eobj {
 		return errors.New("object id in use")
 	}
@@ -403,14 +404,14 @@ func (c *Connection) InitObjectId(obj QObject, id string) error {
 	return err
 }
 
-func (c *Connection) sendUpdate(impl *objectImpl) error {
+func (c *Connection) sendUpdate(impl *QObject) error {
 	if !impl.Referenced() {
 		return nil
 	}
 
-	data, err := impl.MarshalObject()
+	data, err := impl.marshalObject()
 	if err != nil {
-		c.warn("marshal of object %s (type %s) failed: %s", impl.Id, impl.Type.Name, err)
+		c.warn("marshal of object %s (type %s) failed: %s", impl.id, impl.typeInfo.Name, err)
 		return err
 	}
 
@@ -426,7 +427,7 @@ func (c *Connection) sendUpdate(impl *objectImpl) error {
 	return nil
 }
 
-func (c *Connection) sendEmit(obj QObject, method string, data []interface{}) error {
+func (c *Connection) sendEmit(obj *QObject, method string, data []interface{}) error {
 	c.sendMessage(struct {
 		messageBase
 		Identifier string        `json:"identifier"`
@@ -450,7 +451,7 @@ func (c *Connection) sendEmit(obj QObject, method string, data []interface{}) er
 // for instantiated types to handle object creation and destruction.
 //
 // Instantiated objects are normal objects in every way, including for garbage collection.
-func (c *Connection) RegisterTypeFactory(name string, t QObject, factory func() QObject) error {
+func (c *Connection) RegisterTypeFactory(name string, t AnyQObject, factory func() AnyQObject) error {
 	if c.started {
 		return fmt.Errorf("Type '%s' must be registered before the connection starts", name)
 	} else if len(c.instantiable) >= 10 {
@@ -486,12 +487,12 @@ func (c *Connection) RegisterTypeFactory(name string, t QObject, factory func() 
 // for instantiated types to handle object creation and destruction.
 //
 // Instantiated objects are normal objects in every way, including for garbage collection.
-func (c *Connection) RegisterType(name string, template QObject) error {
+func (c *Connection) RegisterType(name string, template AnyQObject) error {
 	t := reflect.Indirect(reflect.ValueOf(template))
-	factory := func() QObject {
+	factory := func() AnyQObject {
 		obj := reflect.New(t.Type())
 		obj.Elem().Set(t)
-		return obj.Interface().(QObject)
+		return obj.Interface().(AnyQObject)
 	}
 	return c.RegisterTypeFactory(name, template, factory)
 }

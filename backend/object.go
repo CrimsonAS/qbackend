@@ -126,30 +126,30 @@ const (
 // QObject types registered through Connection.RegisterType() can be created from QML
 // declaratively, like any other native type. See that method and the package
 // documentation for details.
-type QObject interface {
-	json.Marshaler
+type QObject struct {
+	c        *Connection
+	id       string
+	ref      bool
+	inactive bool
 
-	// Connection returns the connection associated with this object.
-	Connection() *Connection
-	// Identifier is unique for each object. Objects can be found by their
-	// identifier from the Connection. The identifier is randomly assigned,
-	// unless it was initialized explicitly with Connection.InitObjectId.
-	Identifier() string
-	// Referenced returns true when there is a client-side reference to
-	// this object. When false, all signals are ignored and the object
-	// will not be encoded.
-	Referenced() bool
+	object   AnyQObject
+	typeInfo *typeInfo
 
-	// Emit emits the named signal asynchronously. The signal must be
-	// defined within the object and parameters must match exactly.
-	Emit(signal string, args ...interface{})
-	// ResetProperties is effectively identical to emitting the Changed
-	// signal for all properties of the object.
-	ResetProperties()
-	// Changed updates the value of a property on the client, and sends
-	// the changed signal. Changed should be used instead of emitting the
-	// signal directly; it also handles value updates.
-	Changed(property string)
+	// Number of other objects that have a marshaled reference to this one
+	refCount int
+	// object id -> count for references to other objects in our properties
+	refChildren map[string]int
+	// Keep object alive until refGraceTime
+	refGraceTime time.Time
+}
+
+// AnyQObject is an interface to receive any type usable as a QObject
+type AnyQObject interface {
+	qObject() *QObject
+}
+
+func (q *QObject) qObject() *QObject {
+	return q
 }
 
 // If a QObject type implements QObjectHasInit, the InitObject function will
@@ -157,7 +157,6 @@ type QObject interface {
 // initialize fields automatically at the right time, or even as a form of
 // constructor.
 type QObjectHasInit interface {
-	QObject
 	InitObject()
 }
 
@@ -168,99 +167,62 @@ type QObjectHasInit interface {
 //
 // These methods are never called for objects that aren't created from QML.
 type QObjectHasStatus interface {
-	QObject
 	ComponentComplete()
 	ComponentDestruction()
 }
 
-type objectImpl struct {
-	C        *Connection
-	Id       string
-	Ref      bool
-	Inactive bool
-
-	Object interface{}
-	Type   *typeInfo
-
-	// Number of other objects that have a marshaled reference to this one
-	refCount int
-	// object id -> count for references to other objects in our properties
-	refChildren map[string]int
-	// Keep object alive until refGraceTime
-	refGraceTime time.Time
-}
-
-var errNotQObject = errors.New("Struct does not embed QObject")
-
-// asQObject returns the *objectImpl for obj, if any, and a boolean indicating if
+// asQObject returns the *QObject for obj, if any, and a boolean indicating if
 // obj implements QObject at all.
-func asQObject(obj interface{}) (*objectImpl, bool) {
-	if _, ok := obj.(QObject); !ok {
-		return nil, false
-	} else if v := reflect.Indirect(reflect.ValueOf(obj)); !v.IsValid() || v.Kind() != reflect.Struct {
-		return nil, false
-	} else if f := v.FieldByName("QObject"); !f.IsValid() {
-		return nil, false
+func asQObject(obj interface{}) (*QObject, bool) {
+	if q, ok := obj.(AnyQObject); ok {
+		return q.qObject(), true
 	} else {
-		impl, _ := f.Interface().(*objectImpl)
-		return impl, true
+		return nil, false
 	}
 }
 
-func initObject(object interface{}, c *Connection) (*objectImpl, error) {
+func initObject(object AnyQObject, c *Connection) (*QObject, error) {
 	u, _ := uuid.NewV4()
 	return initObjectId(object, c, u.String())
 }
 
-func initObjectId(object interface{}, c *Connection, id string) (*objectImpl, error) {
+// XXX split up registration and conenction a bit so reg can happen from anything?
+func initObjectId(object AnyQObject, c *Connection, id string) (*QObject, error) {
 	var newObject bool
-	value := reflect.Indirect(reflect.ValueOf(object))
-	if !value.IsValid() || value.Kind() != reflect.Struct {
-		return nil, errNotQObject
-	}
-	field := value.FieldByName("QObject")
-	if !field.IsValid() {
-		return nil, errNotQObject
-	}
+	q := object.qObject()
 
-	var impl *objectImpl
-	if impl, _ = field.Interface().(*objectImpl); impl == nil {
+	if q.id == "" {
 		newObject = true
-		impl = &objectImpl{
-			C:           c,
-			Id:          id,
-			Object:      object,
+		*q = QObject{
+			c:           c,
+			id:          id,
+			object:      object,
 			refChildren: make(map[string]int),
 		}
 
+		value := reflect.Indirect(reflect.ValueOf(object))
 		if ti, err := parseType(value.Type()); err != nil {
 			return nil, err
 		} else {
-			impl.Type = ti
+			q.typeInfo = ti
 		}
 
-		// Write to the QObject embedded field
-		field.Set(reflect.ValueOf(impl))
-
-		// Initialize signals
-		if err := initSignals(object, impl); err != nil {
-			return nil, err
-		}
+		q.initSignals()
 	} else {
-		if !impl.Inactive {
+		if !q.inactive {
 			// Active object, nothing needs to happen here
-			return impl, nil
+			return q, nil
 		}
 		// Reactivating object (after collectObjects)
-		impl.Inactive = false
+		q.inactive = false
 	}
 
 	// Set grace period to stop the object from being removed prematurely
-	impl.refsChanged()
+	q.refsChanged()
 
 	// Register with connection
 	if c != nil {
-		c.addObject(object.(QObject))
+		c.addObject(q)
 	}
 
 	// Call InitObject for new objects if implemented
@@ -270,11 +232,11 @@ func initObjectId(object interface{}, c *Connection, id string) (*objectImpl, er
 		}
 	}
 
-	return impl, nil
+	return q, nil
 }
 
-func initSignals(object interface{}, impl *objectImpl) error {
-	v := reflect.ValueOf(object).Elem()
+func (q *QObject) initSignals() {
+	v := reflect.ValueOf(q.object).Elem()
 
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
@@ -283,49 +245,60 @@ func initSignals(object interface{}, impl *objectImpl) error {
 		}
 
 		name := typeFieldName(v.Type().Field(i))
-		if _, isSignal := impl.Type.Signals[name]; !isSignal {
+		if _, isSignal := q.typeInfo.Signals[name]; !isSignal {
 			continue
 		}
 
 		// Build a function to assign as the signal
 		f := reflect.MakeFunc(field.Type(), func(args []reflect.Value) []reflect.Value {
-			impl.emitReflected(name, args)
+			q.emitReflected(name, args)
 			return nil
 		})
 		field.Set(f)
 	}
 
-	return nil
+	return
 }
 
 // Call after changing o.refCount or o.Ref, or when the grace period should reset
-func (o *objectImpl) refsChanged() {
-	if !o.Ref && o.refCount < 1 {
+func (o *QObject) refsChanged() {
+	if !o.ref && o.refCount < 1 {
 		o.refGraceTime = time.Now().Add(objectRefGracePeriod)
 	}
 }
 
-func (o *objectImpl) Connection() *Connection {
-	return o.C
+// XXX Are these functions actually wanted?
+
+// Connection returns the connection associated with this object.
+func (o *QObject) Connection() *Connection {
+	return o.c
 }
-func (o *objectImpl) Identifier() string {
-	return o.Id
+
+// Identifier is unique for each object. Objects can be found by their
+// identifier from the Connection. The identifier is randomly assigned,
+// unless it was initialized explicitly with Connection.InitObjectId.
+func (o *QObject) Identifier() string {
+	return o.id
 }
-func (o *objectImpl) Referenced() bool {
-	return o.Ref
+
+// Referenced returns true when there is a client-side reference to
+// this object. When false, all signals are ignored and the object
+// will not be encoded.
+func (o *QObject) Referenced() bool {
+	return o.ref
 }
 
 // Invoke calls the named method of the object, converting or
 // unmarshaling parameters as necessary. An error is returned if the
 // method is not invoked, but the return value of the method is
 // ignored.
-func (o *objectImpl) Invoke(methodName string, inArgs ...interface{}) error {
-	if _, exists := o.Type.Methods[methodName]; !exists {
+func (o *QObject) invoke(methodName string, inArgs ...interface{}) error {
+	if _, exists := o.typeInfo.Methods[methodName]; !exists {
 		return errors.New("method does not exist")
 	}
 
 	// Reflect to find a method named methodName on object
-	dataValue := reflect.ValueOf(o.Object)
+	dataValue := reflect.ValueOf(o.object)
 	method := typeMethodValueByName(dataValue, methodName)
 	if !method.IsValid() {
 		return errors.New("method does not exist")
@@ -365,7 +338,7 @@ func (o *objectImpl) Invoke(methodName string, inArgs ...interface{}) error {
 
 			// Will be nil if the object does not exist
 			// Replace the inArgValue so the logic below can handle type matching and conversion
-			inArgValue = reflect.ValueOf(o.C.Object(objV.String()))
+			inArgValue = reflect.ValueOf(o.c.Object(objV.String()))
 		}
 
 		// Match types, converting or unmarshaling if possible
@@ -421,8 +394,10 @@ func (o *objectImpl) Invoke(methodName string, inArgs ...interface{}) error {
 	return nil
 }
 
-func (o *objectImpl) Emit(signal string, args ...interface{}) {
-	if !o.Referenced() {
+// Emit emits the named signal asynchronously. The signal must be
+// defined within the object and parameters must match exactly.
+func (o *QObject) Emit(signal string, args ...interface{}) {
+	if !o.ref {
 		return
 	}
 
@@ -434,10 +409,10 @@ func (o *objectImpl) Emit(signal string, args ...interface{}) {
 		return
 	}
 
-	o.C.sendEmit(o.Object.(QObject), signal, args)
+	o.c.sendEmit(o, signal, args)
 }
 
-func (o *objectImpl) emitReflected(signal string, args []reflect.Value) {
+func (o *QObject) emitReflected(signal string, args []reflect.Value) {
 	unwrappedArgs := make([]interface{}, 0, len(args))
 	for _, a := range args {
 		unwrappedArgs = append(unwrappedArgs, a.Interface())
@@ -445,17 +420,22 @@ func (o *objectImpl) emitReflected(signal string, args []reflect.Value) {
 	o.Emit(signal, unwrappedArgs...)
 }
 
-func (o *objectImpl) Changed(property string) {
+// Changed updates the value of a property on the client, and sends
+// the changed signal. Changed should be used instead of emitting the
+// signal directly; it also handles value updates.
+func (o *QObject) Changed(property string) {
 	// Currently, all property updates are full resets, and the client will
 	// emit changed signals for them. That will hopefully change
 	o.ResetProperties()
 }
 
-func (o *objectImpl) ResetProperties() {
+// ResetProperties is effectively identical to emitting the Changed
+// signal for all properties of the object.
+func (o *QObject) ResetProperties() {
 	if !o.Referenced() {
 		return
 	}
-	o.C.sendUpdate(o)
+	o.c.sendUpdate(o)
 }
 
 // Unfortunately, even though this method is embedded onto the object type, it can't
@@ -467,22 +447,22 @@ func (o *objectImpl) ResetProperties() {
 // Even if this object were guaranteed to have been initialized, QObjects do not
 // marshal recursively, and there would be no way to prevent this within MarshalJSON.
 //
-// Instead, MarshalObject handles the correct marshaling of values for object types,
+// Instead, marshalObject handles the correct marshaling of values for object types,
 // and this function returns the typeinfo that is appropriate when an object is
 // referenced from another object.
-func (o *objectImpl) MarshalJSON() ([]byte, error) {
+func (o *QObject) MarshalJSON() ([]byte, error) {
 	var desc interface{}
 
 	// If the client has previously acknowledged an object with this type, there is
 	// no need to send the full type structure again; it will be looked up based on
 	// typeName.
-	if o.C.typeIsAcknowledged(o.Type) {
+	if o.c.typeIsAcknowledged(o.typeInfo) {
 		desc = struct {
 			Name    string `json:"name"`
 			Omitted bool   `json:"omitted"`
-		}{o.Type.Name, true}
+		}{o.typeInfo.Name, true}
 	} else {
-		desc = o.Type
+		desc = o.typeInfo
 	}
 
 	obj := struct {
@@ -491,7 +471,7 @@ func (o *objectImpl) MarshalJSON() ([]byte, error) {
 		Type       interface{} `json:"type"`
 	}{
 		"object",
-		o.Identifier(),
+		o.id,
 		desc,
 	}
 
@@ -504,7 +484,7 @@ func (o *objectImpl) MarshalJSON() ([]byte, error) {
 }
 
 // As noted above, MarshalJSON can't correctly capture and initialize trees containing
-// a QObject. MarshalObject scans the struct to initialize QObjects, then returns a
+// a QObject. marshalObject scans the struct to initialize QObjects, then returns a
 // map that correctly represents the properties of this object. That map can be passed
 // (in-)directly to json.Marshal. Specific differences from JSON marshal are:
 //
@@ -517,11 +497,11 @@ func (o *objectImpl) MarshalJSON() ([]byte, error) {
 //     marshal appropriately
 //
 // Non-QObject fields will be marshaled normally with json.Marshal.
-func (o *objectImpl) MarshalObject() (map[string]interface{}, error) {
+func (o *QObject) marshalObject() (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 
-	value := reflect.Indirect(reflect.ValueOf(o.Object))
-	for name, index := range o.Type.propertyFieldIndex {
+	value := reflect.Indirect(reflect.ValueOf(o.object))
+	for name, index := range o.typeInfo.propertyFieldIndex {
 		field := value.FieldByIndex(index)
 		if refs, err := o.initObjectsUnder(field); err != nil {
 			return nil, err
@@ -535,7 +515,7 @@ func (o *objectImpl) MarshalObject() (map[string]interface{}, error) {
 			for _, id := range refs {
 				if _, existing := o.refChildren[id]; !existing {
 					// Reference to an object that was not referenced before
-					if obj := o.C.Object(id); obj != nil {
+					if obj := o.c.Object(id); obj != nil {
 						impl, _ := asQObject(obj)
 						impl.refCount++
 						o.refsChanged()
@@ -550,7 +530,7 @@ func (o *objectImpl) MarshalObject() (map[string]interface{}, error) {
 					continue
 				}
 				delete(o.refChildren, k)
-				if obj := o.C.Object(k); obj != nil {
+				if obj := o.c.Object(k); obj != nil {
 					impl, _ := asQObject(obj)
 					impl.refCount--
 					o.refsChanged()
@@ -569,7 +549,7 @@ func (o *objectImpl) MarshalObject() (map[string]interface{}, error) {
 //
 // This scan also maintains the list of object IDs referenced within this
 // object, which is returned here and stored as refChildren.
-func (o *objectImpl) initObjectsUnder(v reflect.Value) ([]string, error) {
+func (o *QObject) initObjectsUnder(v reflect.Value) ([]string, error) {
 	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
 		v = v.Elem()
 		if !v.IsValid() {
@@ -610,13 +590,14 @@ func (o *objectImpl) initObjectsUnder(v reflect.Value) ([]string, error) {
 		}
 
 	case reflect.Struct:
-		if newObj, err := initObject(v.Addr().Interface(), o.C); err == nil {
-			// Valid QObject, possibly just initialized. Stop recursion here
-			refs = append(refs, newObj.Identifier())
-			return refs, nil
-		} else if err != errNotQObject {
-			// Is a QObject, but initialization failed
-			return nil, err
+		if obj, ok := v.Addr().Interface().(AnyQObject); ok {
+			if q, err := initObject(obj, o.c); err == nil {
+				// Valid QObject, possibly just initialized. Stop recursion here
+				refs = append(refs, q.id)
+				return refs, nil
+			} else {
+				return nil, err
+			}
 		}
 
 		// Not a QObject

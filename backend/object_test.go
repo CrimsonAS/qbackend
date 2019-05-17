@@ -38,16 +38,13 @@ func TestMain(m *testing.M) {
 
 func TestQObjectInit(t *testing.T) {
 	q := &BasicQObject{}
-	if isQObject, _ := QObjectFor(q); !isQObject {
-		t.Error("QObject struct not detected as QObject")
-	}
 
 	if err := dummyConnection.InitObject(q); err != nil {
 		t.Errorf("QObject initialization failed: %s", err)
 	}
 
-	if q.QObject == nil {
-		t.Error("Embedded QObject still nil after initialization")
+	if q.QObject.id == "" {
+		t.Error("Embedded QObject still blank after initialization")
 	}
 
 	// XXX Identifier uniqueness
@@ -57,8 +54,7 @@ func TestQObjectInit(t *testing.T) {
 		t.Error("QObjectHasInit initialization function not called")
 	}
 
-	ti, _ := json.Marshal(q.QObject.(*objectImpl).Type)
-	t.Logf("Typeinfo: %s", ti)
+	t.Logf("Typeinfo: %v", q.QObject.typeInfo)
 }
 
 func TestMarshal(t *testing.T) {
@@ -74,7 +70,7 @@ func TestMarshal(t *testing.T) {
 		t.Errorf("QObject initialization failed: %s", err)
 	}
 
-	data, err := q.MarshalObject()
+	data, err := q.marshalObject()
 	if err != nil {
 		t.Errorf("QObject marshal failed: %s", err)
 	}
@@ -104,7 +100,7 @@ func TestSignals(t *testing.T) {
 		t.Errorf("QObject initialization didn't initialize signals: %+v", q)
 	}
 
-	ti, _ := json.Marshal(q.QObject.(*objectImpl).Type)
+	ti, _ := json.Marshal(q.QObject.typeInfo)
 	t.Logf("Typeinfo: %s", ti)
 
 	// Emit signals
@@ -139,15 +135,15 @@ func TestMethods(t *testing.T) {
 		t.Errorf("QObject initialization failed: %s", err)
 	}
 
-	ti, _ := json.Marshal(q.QObject.(*objectImpl).Type)
+	ti, _ := json.Marshal(q.QObject.typeInfo)
 	t.Logf("Typeinfo: %s", ti)
 
-	err := q.Invoke("increment")
+	err := q.invoke("increment")
 	if err != nil || q.Count != 1 {
 		t.Errorf("Invoking 'Increment' failed: %v", err)
 	}
 
-	err = q.Invoke("add", 4)
+	err = q.invoke("add", 4)
 	if err != nil || q.Count != 5 {
 		t.Errorf("Invoking 'Add' failed: %v", err)
 	}
@@ -162,7 +158,7 @@ func TestMethods(t *testing.T) {
 	strObjRef := make(map[string]string)
 	strObjRef["_qbackend_"] = "object"
 	strObjRef["identifier"] = strObj.Identifier()
-	if err := q.Invoke("update", strObjRef); err != nil {
+	if err := q.invoke("update", strObjRef); err != nil {
 		t.Errorf("Invoking 'Update' failed: %v", err)
 	}
 	if strObj.StringData != "Count is 5" {

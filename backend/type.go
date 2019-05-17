@@ -1,6 +1,7 @@
 package qbackend
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -32,23 +33,10 @@ type typeInfo struct {
 }
 
 var knownTypeInfo = make(map[reflect.Type]*typeInfo)
+var qobjInterfaceType = reflect.TypeOf((*AnyQObject)(nil)).Elem()
 
 func typeIsQObject(t reflect.Type) bool {
-	// This matches the logic in QObjectFor, but on Type instead of Value
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		return false
-	}
-	f, exists := t.FieldByName("QObject")
-	if !exists {
-		return false
-	}
-	if !f.Anonymous || f.Type != reflect.TypeOf((*QObject)(nil)).Elem() {
-		return false
-	}
-	return true
+	return reflect.PtrTo(t).Implements(qobjInterfaceType)
 }
 
 func typeShouldIgnoreField(field reflect.StructField) bool {
@@ -182,9 +170,12 @@ func parseType(t reflect.Type) (*typeInfo, error) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-
 	if typeInfo, exists := knownTypeInfo[t]; exists {
 		return typeInfo, nil
+	}
+
+	if !typeIsQObject(t) {
+		return nil, fmt.Errorf("Type '%s' is not a QObject; it must embed QObject or implement AnyQObject", t.Name())
 	}
 
 	typeInfo := &typeInfo{
@@ -194,17 +185,6 @@ func parseType(t reflect.Type) (*typeInfo, error) {
 		propertyFieldIndex: make(map[string][]int),
 	}
 	typeInfo.Name = t.Name()
-
-	if field, ok := t.FieldByName("QObject"); ok {
-		if field.Type != reflect.TypeOf((*QObject)(nil)).Elem() {
-			return nil, fmt.Errorf("Struct has a 'QObject' field of type '%s'. This field must be a QObject", field.Type.Name())
-		}
-		if !field.Anonymous {
-			return nil, fmt.Errorf("Struct has a 'QObject' field. QObject must be embedded instead")
-		}
-	} else {
-		return nil, errNotQObject
-	}
 
 	// Add properties and signals from fields, including those from anonymous
 	// structs
@@ -292,4 +272,9 @@ func typeFieldsToTypeInfo(typeInfo *typeInfo, t reflect.Type, index []int) error
 		}
 	}
 	return nil
+}
+
+func (t *typeInfo) String() string {
+	str, _ := json.MarshalIndent(t, "", "  ")
+	return string(str)
 }

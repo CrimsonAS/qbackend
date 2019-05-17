@@ -79,7 +79,7 @@ func (m *Model) dataSource() ModelDataSource {
 		return nil
 	}
 
-	if ds, ok := impl.Object.(ModelDataSource); ok {
+	if ds, ok := impl.object.(ModelDataSource); ok {
 		return ds
 	} else {
 		// XXX Object must implement ModelRowSource; warn/error/panic/something
