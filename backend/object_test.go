@@ -165,3 +165,71 @@ func TestMethods(t *testing.T) {
 		t.Error("Object passed as parameter was not modified")
 	}
 }
+
+type NestedQObject struct {
+	QObject
+
+	Object    *NestedQObject
+	InStruct  struct{ Object *NestedQObject }
+	Interface AnyQObject
+	SelfRef   *NestedQObject
+	Double1   *NestedQObject
+	Double2   *NestedQObject
+}
+
+func TestQObjectValue(t *testing.T) {
+	obj := &NestedQObject{
+		Object: &NestedQObject{
+			Object: &NestedQObject{},
+		},
+		InStruct:  struct{ Object *NestedQObject }{&NestedQObject{}},
+		Interface: &NestedQObject{},
+		Double1:   &NestedQObject{},
+	}
+	obj.SelfRef = obj
+	obj.Double2 = obj.Double1
+	nestedObject := obj.Object
+
+	if err := dummyConnection.InitObject(obj); err != nil {
+		t.Errorf("QObject initialization failed: %s", err)
+		return
+	}
+
+	if _, err := obj.marshalObject(); err != nil {
+		t.Errorf("QObject marshalling failed: %s", err)
+		return
+	}
+
+	checkObject := func(name string, child *QObject, refObjCount int, refFieldCount int) {
+		if child.id == "" {
+			t.Errorf("Field '%s' QObject value was not initialized during marshal", name)
+		}
+		// refCount is the number of _objects_ referencing, not the number of fields
+		if child.refCount != refObjCount {
+			t.Errorf("Field '%s' QObject value's refcount is wrong (%d != %d (expected))", name, child.refCount, refObjCount)
+		}
+		if obj.refChildren[child.id] != refFieldCount {
+			t.Errorf("Field '%s' QObject value's refChildren entry is wrong (%d != %d (expected))", name, obj.refChildren[child.id], refFieldCount)
+		}
+	}
+
+	checkObject("Object", obj.Object.qObject(), 1, 1)
+	if obj.Object.Object.id != "" {
+		t.Errorf("QObject somehow initialized objects recursively")
+	}
+	checkObject("InStruct", obj.InStruct.Object.qObject(), 1, 1)
+	checkObject("Interface", obj.Interface.qObject(), 1, 1)
+	// XXX how should self references work? can objects accidentally keep themselves alive?
+	checkObject("SelfRef", obj.SelfRef.qObject(), 1, 1)
+	checkObject("Double1", obj.Double1.qObject(), 1, 2)
+
+	obj.Double2 = nil
+	obj.Object = nil
+	if _, err := obj.marshalObject(); err != nil {
+		t.Errorf("QObject marshalling failed: %s", err)
+		return
+	}
+
+	checkObject("Object", nestedObject.qObject(), 0, 0)
+	checkObject("Double1", obj.Double1.qObject(), 1, 1)
+}
