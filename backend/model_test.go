@@ -26,17 +26,12 @@ var _ ModelDataSource = &CustomModel{}
 // Tests
 func TestModelType(t *testing.T) {
 	model := &CustomModel{}
-	if isQObject, _ := QObjectFor(model); !isQObject {
-		t.Error("CustomModel type is not detected as a QObject")
+	if _, ok := ((interface{})(model)).(AnyQObject); !ok {
+		t.Errorf("CustomModel does not implement AnyQObject")
 	}
 
 	if err := dummyConnection.InitObject(model); err != nil {
 		t.Errorf("CustomModel object initialization failed: %s", err)
-	}
-
-	impl := objectImplFor(model)
-	if impl.Object != model {
-		t.Errorf("CustomModel QObject does not point back to model; expected %v, Object is %v", model, impl.Object)
 	}
 
 	if model.ModelAPI == nil {
