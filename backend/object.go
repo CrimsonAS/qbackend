@@ -500,17 +500,17 @@ func (o *QObject) MarshalJSON() ([]byte, error) {
 func (o *QObject) marshalObject() (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 
+	// Zero out all child ref counts
+	for k, _ := range o.refChildren {
+		o.refChildren[k] = 0
+	}
+
 	value := reflect.Indirect(reflect.ValueOf(o.object))
 	for name, index := range o.typeInfo.propertyFieldIndex {
 		field := value.FieldByIndex(index)
 		if refs, err := o.initObjectsUnder(field); err != nil {
 			return nil, err
 		} else {
-			// Zero out all child ref counts
-			for k, _ := range o.refChildren {
-				o.refChildren[k] = 0
-			}
-
 			// Add references from refs
 			for _, id := range refs {
 				if _, existing := o.refChildren[id]; !existing {
