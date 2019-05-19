@@ -20,6 +20,7 @@ type BasicQObject struct {
 	StringData string
 	StructData BasicStruct
 	Child      *BasicQObject
+	Signal     func()
 
 	initWasCalled bool
 }
@@ -39,6 +40,11 @@ func TestMain(m *testing.M) {
 func TestQObjectInit(t *testing.T) {
 	q := &BasicQObject{}
 
+	// These should silently do nothing on an uninitialized object
+	q.Emit("signal")
+	q.ResetProperties()
+	q.Changed("stringData")
+
 	if err := dummyConnection.InitObject(q); err != nil {
 		t.Errorf("QObject initialization failed: %s", err)
 	}
@@ -47,8 +53,9 @@ func TestQObjectInit(t *testing.T) {
 		t.Error("Embedded QObject still blank after initialization")
 	}
 
-	// XXX Identifier uniqueness
-	// XXX Signal initialization
+	if q.Signal == nil {
+		t.Error("Signal function not initialized by QObject")
+	}
 
 	if !q.initWasCalled {
 		t.Error("QObjectHasInit initialization function not called")

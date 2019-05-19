@@ -413,6 +413,9 @@ func (o *QObject) Emit(signal string, args ...interface{}) {
 }
 
 func (o *QObject) emitReflected(signal string, args []reflect.Value) {
+	if !o.ref {
+		return
+	}
 	unwrappedArgs := make([]interface{}, 0, len(args))
 	for _, a := range args {
 		unwrappedArgs = append(unwrappedArgs, a.Interface())
@@ -432,7 +435,7 @@ func (o *QObject) Changed(property string) {
 // ResetProperties is effectively identical to emitting the Changed
 // signal for all properties of the object.
 func (o *QObject) ResetProperties() {
-	if !o.Referenced() {
+	if !o.ref {
 		return
 	}
 	o.c.sendUpdate(o)
