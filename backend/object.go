@@ -324,6 +324,84 @@ func (o *QObject) Referenced() bool {
 	return o.ref
 }
 
+func (o *QObject) convertType(t reflect.Type, v reflect.Value) (reflect.Value, error) {
+	umType := reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+	var re reflect.Value
+
+	if v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+
+	// Replace references to QObjects with the objects themselves
+	if v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
+		objV := v.MapIndex(reflect.ValueOf("_qbackend_"))
+		if objV.Kind() == reflect.Interface {
+			objV = objV.Elem()
+		}
+		if objV.Kind() != reflect.String || objV.String() != "object" {
+			return re, fmt.Errorf("argument is malformed; object tag is incorrect")
+		}
+		objV = v.MapIndex(reflect.ValueOf("identifier"))
+		if objV.Kind() == reflect.Interface {
+			objV = objV.Elem()
+		}
+		if objV.Kind() != reflect.String {
+			return re, fmt.Errorf("argument is malformed; invalid identifier %v", objV)
+		}
+
+		// Will be nil if the object does not exist
+		// Replace the inArgValue so the logic below can handle type matching and conversion
+		v = reflect.ValueOf(o.c.Object(objV.String()))
+	}
+
+	// Match types, converting or unmarshaling if possible
+	if v.Kind() == reflect.Invalid {
+		// Zero value, argument is nil
+		re = reflect.Zero(t)
+	} else if v.Type() == t {
+		// Types match
+		re = v
+	} else if v.Type().ConvertibleTo(t) {
+		// Convert type directly
+		re = v.Convert(t)
+	} else if v.Kind() == reflect.String {
+		// Attempt to unmarshal via TextUnmarshaler, directly or by pointer
+		var umArg encoding.TextUnmarshaler
+		if t.Implements(umType) {
+			re = reflect.Zero(t)
+			umArg = re.Interface().(encoding.TextUnmarshaler)
+		} else if argTypePtr := reflect.PtrTo(t); argTypePtr.Implements(umType) {
+			re = reflect.New(t)
+			umArg = re.Interface().(encoding.TextUnmarshaler)
+			re = re.Elem()
+		}
+
+		if umArg != nil {
+			err := umArg.UnmarshalText([]byte(v.Interface().(string)))
+			if err != nil {
+				return re, fmt.Errorf("wrong type; expected %s, unmarshal failed: %s", t.String(), err)
+			}
+		}
+	} else if t.Kind() == reflect.Slice && v.Type() == reflect.TypeOf([]interface{}{}) {
+		// Convert []interface{} to another slice type if possible
+		elemType := t.Elem()
+		re = reflect.MakeSlice(t, 0, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			e, err := o.convertType(elemType, v.Index(i))
+			if err != nil {
+				return re, fmt.Errorf("slice: %s", err)
+			}
+			re = reflect.Append(re, e)
+		}
+	}
+
+	if re.IsValid() {
+		return re, nil
+	} else {
+		return re, fmt.Errorf("wrong types; expected %s, provided %s", t.String(), v.Type().String())
+	}
+}
+
 // Invoke calls the named method of the object, converting or
 // unmarshaling parameters as necessary. An error is returned if the
 // method cannot be invoked.
@@ -354,71 +432,13 @@ func (o *QObject) invoke(methodName string, inArgs ...interface{}) ([]interface{
 			methodName, methodType.NumIn(), len(inArgs))
 	}
 
-	umType := reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 	for i, inArg := range inArgs {
 		argType := methodType.In(i)
-		inArgValue := reflect.ValueOf(inArg)
-		var callArg reflect.Value
-
-		// Replace references to QObjects with the objects themselves
-		if inArgValue.Kind() == reflect.Map && inArgValue.Type().Key().Kind() == reflect.String {
-			objV := inArgValue.MapIndex(reflect.ValueOf("_qbackend_"))
-			if objV.Kind() == reflect.Interface {
-				objV = objV.Elem()
-			}
-			if objV.Kind() != reflect.String || objV.String() != "object" {
-				return nil, fmt.Errorf("qobject argument %d is malformed; object tag is incorrect", i)
-			}
-			objV = inArgValue.MapIndex(reflect.ValueOf("identifier"))
-			if objV.Kind() == reflect.Interface {
-				objV = objV.Elem()
-			}
-			if objV.Kind() != reflect.String {
-				return nil, fmt.Errorf("qobject argument %d is malformed; invalid identifier %v", i, objV)
-			}
-
-			// Will be nil if the object does not exist
-			// Replace the inArgValue so the logic below can handle type matching and conversion
-			inArgValue = reflect.ValueOf(o.c.Object(objV.String()))
+		v, err := o.convertType(argType, reflect.ValueOf(inArg))
+		if err != nil {
+			return nil, fmt.Errorf("argument %d: %s", i, err)
 		}
-
-		// Match types, converting or unmarshaling if possible
-		if inArgValue.Kind() == reflect.Invalid {
-			// Zero value, argument is nil
-			callArg = reflect.Zero(argType)
-		} else if inArgValue.Type() == argType {
-			// Types match
-			callArg = inArgValue
-		} else if inArgValue.Type().ConvertibleTo(argType) {
-			// Convert type directly
-			callArg = inArgValue.Convert(argType)
-		} else if inArgValue.Kind() == reflect.String {
-			// Attempt to unmarshal via TextUnmarshaler, directly or by pointer
-			var umArg encoding.TextUnmarshaler
-			if argType.Implements(umType) {
-				callArg = reflect.Zero(argType)
-				umArg = callArg.Interface().(encoding.TextUnmarshaler)
-			} else if argTypePtr := reflect.PtrTo(argType); argTypePtr.Implements(umType) {
-				callArg = reflect.New(argType)
-				umArg = callArg.Interface().(encoding.TextUnmarshaler)
-				callArg = callArg.Elem()
-			}
-
-			if umArg != nil {
-				err := umArg.UnmarshalText([]byte(inArg.(string)))
-				if err != nil {
-					return nil, fmt.Errorf("wrong type for argument %d to %s; expected %s, unmarshal failed: %s",
-						i, methodName, argType.String(), err)
-				}
-			}
-		}
-
-		if callArg.IsValid() {
-			callArgs[i] = callArg
-		} else {
-			return nil, fmt.Errorf("wrong type for argument %d to %s; expected %s, provided %s",
-				i, methodName, argType.String(), inArgValue.Type().String())
-		}
+		callArgs[i] = v
 	}
 
 	// Call the method
