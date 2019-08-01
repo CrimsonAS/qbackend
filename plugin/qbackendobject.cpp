@@ -379,6 +379,13 @@ QJsonValue jsValueToJsonValue(const QJSValue &value)
             // XXX warn about passing non-backend objects
             return QJsonValue(QJsonValue::Undefined);
         }
+    } else if (value.isArray()) {
+        QJsonArray array;
+        int length = value.property("length").toInt();
+        for (int i = 0; i < length; i++) {
+            array.append(jsValueToJsonValue(value.property(i)));
+        }
+        return array;
     } else if (value.isObject()) {
         QJsonObject object;
         QJSValueIterator it(value);
@@ -387,13 +394,6 @@ QJsonValue jsValueToJsonValue(const QJSValue &value)
             object.insert(it.name(), jsValueToJsonValue(it.value()));
         }
         return object;
-    } else if (value.isArray()) {
-        QJsonArray array;
-        int length = value.property("length").toInt();
-        for (int i = 0; i < length; i++) {
-            array.append(jsValueToJsonValue(value.property(i)));
-        }
-        return array;
     } else if (value.isString()) {
         return QJsonValue(value.toString());
     } else if (value.isBool()) {
