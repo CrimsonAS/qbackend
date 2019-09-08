@@ -18,21 +18,20 @@ Q_LOGGING_CATEGORY(lcModel, "backend.model")
 
 QBackendModel::QBackendModel(QBackendConnection *connection, QByteArray identifier, QMetaObject *metaObject, QObject *parent)
     : QAbstractListModel(parent)
-    , d(new BackendModelPrivate(this, connection, identifier))
     , m_metaObject(metaObject)
 {
+    d = new BackendModelPrivate(this, connection, identifier);
 }
 
 QBackendModel::QBackendModel(QBackendConnection *connection, QMetaObject *type)
-    : d(new BackendModelPrivate(type->className(), this, connection))
-    , m_metaObject(type)
+    : m_metaObject(type)
 {
+    d = new BackendModelPrivate(type->className(), this, connection);
 }
 
 QBackendModel::~QBackendModel()
 {
     delete d;
-    free(m_metaObject);
 }
 
 const QMetaObject *QBackendModel::metaObject() const

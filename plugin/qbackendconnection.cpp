@@ -739,7 +739,5 @@ QMetaObject *QBackendConnection::newTypeMetaObject(const QJsonObject &type)
         qDebug(lcConnection) << "Cached metaobject for type" << type.value("name").toString();
     }
 
-    // Return a copy of the cached metaobject
-    QMetaObjectBuilder b(mo);
-    return b.toMetaObject();
+    return mo;
 }

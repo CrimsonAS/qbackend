@@ -33,21 +33,20 @@ QMetaObject QBackendObject::staticMetaObject =
 
 QBackendObject::QBackendObject(QBackendConnection *connection, QByteArray identifier, QMetaObject *metaObject, QObject *parent)
     : QObject(parent)
-    , d(new BackendObjectPrivate(this, connection, identifier))
     , m_metaObject(metaObject)
 {
+    d = new BackendObjectPrivate(this, connection, identifier);
 }
 
 QBackendObject::QBackendObject(QBackendConnection *connection, QMetaObject *type)
-    : d(new BackendObjectPrivate(type->className(), this, connection))
-    , m_metaObject(type)
+    : m_metaObject(type)
 {
+    d = new BackendObjectPrivate(type->className(), this, connection);
 }
 
 QBackendObject::~QBackendObject()
 {
     delete d;
-    free(m_metaObject);
 }
 
 const QMetaObject *QBackendObject::metaObject() const
