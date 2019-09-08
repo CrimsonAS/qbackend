@@ -15,6 +15,7 @@ public:
     static QMetaObject staticMetaObject;
     virtual const QMetaObject *metaObject() const override;
     virtual int qt_metacall(QMetaObject::Call c, int id, void **argv) override;
+    virtual void *qt_metacast(const char *clname) override;
 
     void classBegin() override;
     void componentComplete() override;

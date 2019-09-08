@@ -63,6 +63,15 @@ int QBackendObject::qt_metacall(QMetaObject::Call c, int id, void **argv)
     return d->metacall(c, id, argv);
 }
 
+void *QBackendObject::qt_metacast(const char *clname)
+{
+    if (!clname)
+        return nullptr;
+    if (!strcmp(clname, m_metaObject->className()))
+        return static_cast<void*>(this);
+    return QObject::qt_metacast(clname);
+}
+
 void QBackendObject::classBegin()
 {
     d->classBegin();

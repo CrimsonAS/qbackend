@@ -19,6 +19,7 @@ public:
 
     virtual const QMetaObject *metaObject() const override;
     virtual int qt_metacall(QMetaObject::Call c, int id, void **argv) override;
+    virtual void *qt_metacast(const char *clname) override;
 
     QHash<int, QByteArray> roleNames() const override;
     int rowCount(const QModelIndex&) const override;

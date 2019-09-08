@@ -48,6 +48,15 @@ int QBackendModel::qt_metacall(QMetaObject::Call c, int id, void **argv)
     return d->metacall(c, id, argv);
 }
 
+void *QBackendModel::qt_metacast(const char *clname)
+{
+    if (!clname)
+        return nullptr;
+    if (!strcmp(clname, m_metaObject->className()))
+        return static_cast<void*>(this);
+    return QAbstractListModel::qt_metacast(clname);
+}
+
 void QBackendModel::classBegin()
 {
     d->classBegin();
