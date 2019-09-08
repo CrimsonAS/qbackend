@@ -228,11 +228,15 @@ void QBackendConnection::registerTypes(const char *uri)
 
     for (const QJsonValue &v : qAsConst(m_creatableTypes)) {
         QJsonObject type = v.toObject();
+        QMetaObject *metaObject = newTypeMetaObject(type);
+        m_typeCache.insert(type.value("name").toString(), metaObject);
+        qCDebug(lcConnection) << "Added instantiable type" << metaObject->className() << "to type cache under" << type.value("name").toString();
+
         // See instantiable.h for an explanation of how this magic works
         if (!type.value("properties").toObject().value("_qb_model").isUndefined())
-            addInstantiableBackendType<QBackendModel>(uri, this, type);
+            addInstantiableBackendType<QBackendModel>(uri, this, metaObject);
         else
-            addInstantiableBackendType<QBackendObject>(uri, this, type);
+            addInstantiableBackendType<QBackendObject>(uri, this, metaObject);
     }
 
     for (auto it = m_singletons.constBegin(); it != m_singletons.constEnd(); it++) {
@@ -585,7 +589,7 @@ void QBackendConnection::addObjectProxy(const QByteArray& identifier, QBackendRe
         return;
     }
 
-    qCDebug(lcConnection) << "Creating remote object handler " << identifier << " on connection " << this << " for " << proxy;
+    qCDebug(lcConnection) << "Creating remote object handler " << identifier << " on connection " << this << " for " << proxy << "of object" << proxy->object();
     m_objects.insert(identifier, proxy);
 
     write(QJsonObject{

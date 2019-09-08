@@ -34,13 +34,12 @@ template<typename T, int I> class InstantiableBackendType : public T
 public:
     static QMetaObject staticMetaObject;
 
-    static void setupType(const char *uri, QBackendConnection *connection, const QJsonObject &type)
+    static void setupType(const char *uri, QBackendConnection *connection, const QMetaObject *metaObject)
     {
         Q_ASSERT(!m_connection);
         m_connection = connection;
-        m_type = type;
 
-        staticMetaObject = *metaObjectFromType(type, &T::staticMetaObject);
+        staticMetaObject = *metaObject;
 
         qmlRegisterType<InstantiableBackendType<T,I>>(uri, 1, 0, staticMetaObject.className());
 
@@ -56,28 +55,24 @@ public:
 
 private:
     static QBackendConnection *m_connection;
-    static QJsonObject m_type;
 
     QMetaObject *instanceMetaObject()
     {
-        QMetaObjectBuilder b(&staticMetaObject);
-        b.setSuperClass(&T::staticMetaObject);
-        return b.toMetaObject();
+        return &staticMetaObject;
     }
 };
 
 template<typename T, int I> QMetaObject InstantiableBackendType<T,I>::staticMetaObject;
 template<typename T, int I> QBackendConnection *InstantiableBackendType<T,I>::m_connection;
-template<typename T, int I> QJsonObject InstantiableBackendType<T,I>::m_type;
 
-template<typename T> void addInstantiableBackendType(const char *uri, QBackendConnection *c, const QJsonObject &type)
+template<typename T> void addInstantiableBackendType(const char *uri, QBackendConnection *c, QMetaObject *type)
 {
     // All of these are compile-time template instantiations; they come at a cost even if not used at runtime.
     static constexpr int maxTypes = 10;
     addInstantiableBackendType<T,maxTypes>(uri, c, type);
 }
 
-template<typename T, int I, typename std::enable_if<(I>0), int>::type = 0> void addInstantiableBackendType(const char *uri, QBackendConnection *c, const QJsonObject &type)
+template<typename T, int I, typename std::enable_if<(I>0), int>::type = 0> void addInstantiableBackendType(const char *uri, QBackendConnection *c, QMetaObject *type)
 {
     static bool used;
     if (used) {
@@ -88,11 +83,11 @@ template<typename T, int I, typename std::enable_if<(I>0), int>::type = 0> void 
     }
 }
 
-template<typename T, int I, typename std::enable_if<I==0, int>::type = 0> void addInstantiableBackendType(const char *uri, QBackendConnection *c, const QJsonObject &type)
+template<typename T, int I, typename std::enable_if<I==0, int>::type = 0> void addInstantiableBackendType(const char *uri, QBackendConnection *c, QMetaObject *type)
 {
     Q_UNUSED(uri);
     Q_UNUSED(c);
-    qCCritical(lcConnection) << "Backend has registered too many instantiable types. Type" << type.value("name").toString() << "and all future types will be discarded.";
+    qCCritical(lcConnection) << "Backend has registered too many instantiable types. Type" << type->className() << "and all future types will be discarded.";
 }
 
 // Even more than with instantiables, there's no reason to require a real type for a singleton.
