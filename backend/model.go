@@ -39,6 +39,8 @@ type modelAPI struct {
 	RoleNames []string
 	BatchSize int
 
+	clientHasReset bool
+
 	// Signals
 	ModelReset   func([]interface{}, int)      `qbackend:"rowData,moreRows"`
 	ModelInsert  func(int, []interface{}, int) `qbackend:"start,rowData,moreRows"`
@@ -49,6 +51,7 @@ type modelAPI struct {
 }
 
 func (m *modelAPI) Reset() {
+	m.clientHasReset = true
 	m.Model.Reset()
 }
 
@@ -139,20 +142,32 @@ func (m *modelAPI) getRows(start, count, batchSize int) ([]interface{}, int) {
 }
 
 func (m *Model) Reset() {
+	if !m.ModelAPI.clientHasReset {
+		return
+	}
 	rows, moreRows := m.ModelAPI.getRows(0, -1, m.ModelAPI.BatchSize)
 	m.ModelAPI.Emit("modelReset", rows, moreRows)
 }
 
 func (m *Model) Inserted(start, count int) {
+	if !m.ModelAPI.clientHasReset {
+		return
+	}
 	rows, moreRows := m.ModelAPI.getRows(start, count, m.ModelAPI.BatchSize)
 	m.ModelAPI.Emit("modelInsert", start, rows, moreRows)
 }
 
 func (m *Model) Removed(start, count int) {
+	if !m.ModelAPI.clientHasReset {
+		return
+	}
 	m.ModelAPI.Emit("modelRemove", start, start+count-1)
 }
 
 func (m *Model) Moved(start, count, destination int) {
+	if !m.ModelAPI.clientHasReset {
+		return
+	}
 	m.ModelAPI.Emit("modelMove", start, start+count-1, destination)
 }
 
@@ -160,6 +175,9 @@ func (m *Model) Updated(row int) {
 	data := m.dataSource()
 	if data == nil {
 		// No-op for uninitialized objects
+		return
+	}
+	if !m.ModelAPI.clientHasReset {
 		return
 	}
 

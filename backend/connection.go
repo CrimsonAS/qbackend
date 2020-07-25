@@ -25,6 +25,7 @@ type Connection struct {
 	started       bool
 	processSignal chan struct{}
 	queue         chan []byte
+	callQueue     chan func()
 }
 
 // NewConnection creates a new connection from an open stream. To use the
@@ -45,8 +46,9 @@ func NewConnectionSplit(in io.ReadCloser, out io.WriteCloser) *Connection {
 		instantiable:  make(map[string]instantiableType),
 		singletons:    make(map[string]*QObject),
 		knownTypes:    make(map[string]struct{}),
-		processSignal: make(chan struct{}, 2),
+		processSignal: make(chan struct{}, 128),
 		queue:         make(chan []byte, 128),
+		callQueue:     make(chan func(), 128),
 	}
 	return c
 }
@@ -83,6 +85,11 @@ func (c *Connection) sendMessage(msg interface{}) {
 		return
 	}
 	fmt.Fprintf(c.out, "%d %s\n", len(buf), buf)
+}
+
+func (c *Connection) callLater(cb func()) {
+	c.callQueue <- cb
+	c.processSignal <- struct{}{}
 }
 
 // handle() runs in an internal goroutine to read from 'in'. Messages are
@@ -205,6 +212,7 @@ func (c *Connection) Run() error {
 // connection.
 func (c *Connection) Process() error {
 	c.ensureHandler()
+	c.flushCallQueue()
 	lastCollection := time.Now()
 
 	for {
@@ -212,6 +220,7 @@ func (c *Connection) Process() error {
 		select {
 		case data = <-c.queue:
 		default:
+			c.flushCallQueue()
 			return c.err
 		}
 
@@ -276,9 +285,12 @@ func (c *Connection) Process() error {
 					break
 				}
 				returnId, _ := msg["return"].(string)
+				implId := impl.Identifier()
 
-				re, err := impl.invoke(method, params...)
-				if returnId != "" {
+				sendReturn := func(values []interface{}, err error) {
+					if returnId == "" {
+						return
+					}
 					var errString string
 					if err != nil {
 						errString = err.Error()
@@ -292,12 +304,29 @@ func (c *Connection) Process() error {
 						Value      []interface{} `json:"value,omitempty"`
 					}{
 						messageBase{"INVOKE_RETURN"},
-						impl.Identifier(),
+						implId,
 						returnId,
 						errString,
-						re,
+						values,
 					})
 				}
+
+				values, err := impl.invoke(method, params...)
+				if err == nil && len(values) == 1 {
+					if promise, ok := values[0].(*InvokedPromise); ok {
+						promise.setCallback(func(values []interface{}, err error) {
+							c.callLater(func() {
+								for _, rv := range values {
+									impl.initObjectsUnder(reflect.ValueOf(rv))
+								}
+								sendReturn(values, err)
+							})
+						})
+						goto handled
+					}
+				}
+				sendReturn(values, err)
+			handled:
 			} else {
 				c.fatal("invoke of %s on unknown object %s", method, identifier)
 			}
@@ -319,6 +348,17 @@ func (c *Connection) Process() error {
 func (c *Connection) ProcessSignal() <-chan struct{} {
 	c.ensureHandler()
 	return c.processSignal
+}
+
+func (c *Connection) flushCallQueue() {
+	for {
+		select {
+		case cb := <-c.callQueue:
+			cb()
+		default:
+			return
+		}
+	}
 }
 
 func (c *Connection) addObject(obj *QObject) {
