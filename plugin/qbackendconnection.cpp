@@ -9,6 +9,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QUuid>
+#include <fcntl.h>
 
 #include "qbackendconnection.h"
 #include "qbackendobject.h"
@@ -86,6 +87,15 @@ void QBackendConnection::setUrl(const QUrl& url)
 
         if (rdFd < 0 || wrFd < 0) {
             qCritical() << "Invalid QBackendConnection url" << url;
+            return;
+        }
+
+        if (fcntl(rdFd, F_SETFL, fcntl(rdFd, F_GETFL, 0) | O_NONBLOCK) < 0) {
+            qCritical() << "QBackendConnection failed to set flags for read fd";
+            return;
+        }
+        if (fcntl(wrFd, F_SETFL, fcntl(wrFd, F_GETFL, 0) | O_NONBLOCK) < 0) {
+            qCritical() << "QBackendConnection failed to set flags for write fd";
             return;
         }
 
@@ -279,55 +289,58 @@ void QBackendConnection::registerTypes(const char *uri)
 
 void QBackendConnection::handleDataReady()
 {
-    int rdSize = m_readIo->bytesAvailable();
-    if (rdSize < 1) {
-        return;
-    }
-
-    int p = m_msgBuf.size();
-    m_msgBuf.resize(p+rdSize);
-
-    rdSize = m_readIo->read(m_msgBuf.data()+p, qint64(rdSize));
-    if (rdSize < 0 || (rdSize == 0 && !m_readIo->isOpen())) {
-        connectionError("read error");
-        return;
-    } else if (p+rdSize < m_msgBuf.size()) {
+    for (;;) {
+        int rdSize = qMax(int(m_readIo->bytesAvailable()), 1024);
+        int p = m_msgBuf.size();
         m_msgBuf.resize(p+rdSize);
-    }
 
-    while (m_msgBuf.size() >= 2) {
-        int headSz = m_msgBuf.indexOf(' ');
-        if (headSz < 1) {
-            if (headSz == 0) {
-                // Everything has gone wrong
+        rdSize = (int)m_readIo->read(m_msgBuf.data()+p, rdSize);
+        if (rdSize < 0) {
+            m_msgBuf.clear();
+            connectionError("read error");
+            return;
+        }
+        m_msgBuf.resize(p+rdSize);
+        if (rdSize == 0) {
+            if (!m_readIo->isOpen())
+                connectionError("connection closed");
+            return;
+        }
+
+        while (m_msgBuf.size() >= 2) {
+            int headSz = m_msgBuf.indexOf(' ');
+            if (headSz < 1) {
+                if (headSz == 0) {
+                    // Everything has gone wrong
+                    qCDebug(lcConnection) << "Invalid data on connection:" << m_msgBuf;
+                    connectionError("invalid data");
+                }
+                // Otherwise, there's just not a full size yet
+                return;
+            }
+
+            bool szOk = false;
+            int blobSz = m_msgBuf.mid(0, headSz).toInt(&szOk);
+            if (!szOk || blobSz < 1) {
+                // Also everything has gone wrong
                 qCDebug(lcConnection) << "Invalid data on connection:" << m_msgBuf;
                 connectionError("invalid data");
+                return;
             }
-            // Otherwise, there's just not a full size yet
-            return;
+            // Include space in headSz now
+            headSz++;
+
+            // Wait for headSz + blobSz + 1 (the newline) bytes
+            if (m_msgBuf.size() < headSz + blobSz + 1) {
+                return;
+            }
+
+            // Skip past headSz, then read blob and trim newline
+            QByteArray message = m_msgBuf.mid(headSz, blobSz);
+            m_msgBuf.remove(0, headSz+blobSz+1);
+
+            handleMessage(message);
         }
-
-        bool szOk = false;
-        int blobSz = m_msgBuf.mid(0, headSz).toInt(&szOk);
-        if (!szOk || blobSz < 1) {
-            // Also everything has gone wrong
-            qCDebug(lcConnection) << "Invalid data on connection:" << m_msgBuf;
-            connectionError("invalid data");
-            return;
-        }
-        // Include space in headSz now
-        headSz++;
-
-        // Wait for headSz + blobSz + 1 (the newline) bytes
-        if (m_msgBuf.size() < headSz + blobSz + 1) {
-            return;
-        }
-
-        // Skip past headSz, then read blob and trim newline
-        QByteArray message = m_msgBuf.mid(headSz, blobSz);
-        m_msgBuf.remove(0, headSz+blobSz+1);
-
-        handleMessage(message);
     }
 }
 
