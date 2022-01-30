@@ -218,7 +218,7 @@ void BackendModelPrivate::cleanRowCache(int rowHint)
     int removed = 0;
     while (m_rowData.size() > m_cacheSize) {
         auto first = m_rowData.begin();
-        auto last = m_rowData.end()-1;
+        auto last = std::prev(m_rowData.end());
 
         if (std::abs(rowHint-first.key()) >= std::abs(last.key()-rowHint)) {
             m_rowData.erase(first);
@@ -263,11 +263,14 @@ void BackendModelPrivate::doInsert(int start, const QJSValue &data, int moreRows
 
     // Increment keys >= start by size
     QMap<int,QJSValue> tmp;
-    for (auto it = m_rowData.lowerBound(start); it != m_rowData.end(); ) {
+    auto startIt = m_rowData.lowerBound(start);
+    for (auto it = startIt; it != m_rowData.end(); it++) {
         tmp.insert(it.key()+size, it.value());
-        it = m_rowData.erase(it);
     }
-    m_rowData.unite(tmp);
+    m_rowData.erase(startIt, m_rowData.end());
+    for (auto it = tmp.begin(); it != tmp.end(); it++) {
+        m_rowData[it.key()] = std::move(it.value());
+    }
 
     // Insert new row data
     for (int i = 0; i < dataSize; i++) {
@@ -347,7 +350,9 @@ void BackendModelPrivate::doMove(int start, int end, int destination)
             }
         }
     }
-    m_rowData.unite(moveData);
+    for (auto it = moveData.begin(); it != moveData.end(); it++) {
+        m_rowData[it.key()] = it.value();
+    }
 
     model()->endMoveRows();
 }
